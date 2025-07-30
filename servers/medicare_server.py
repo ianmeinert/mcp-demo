@@ -153,3 +153,20 @@ def explain_tool_resource_flow() -> str:
         "get_medicare_document to read a file, and answer_from_medicare_documents to search all documents for relevant information. "
         "Summarize or analyze data using summarize_medicare_dataset_column. Use the explanation prompts for guidance on each dataset or tool."
     )
+
+@mcp.prompt()
+def explain_role_escalation_policy() -> str:
+    """Explain the agent's role escalation policy for authorization."""
+    return (
+        "By default, you should perform all operations as a 'guest'. If you encounter an authorization error, "
+        "ask the user if they would like to proceed as an 'admin'. If the user agrees, retry the operation as 'admin' "
+        "and remember this role for the rest of the session. Always use the least privileged role unless escalation is required."
+    )
+
+@mcp.prompt()
+def notify_user_processing(task_description: str) -> str:
+    """Notify the user that their request is being processed, reiterating the task."""
+    return (
+        f"Thank you for your request. I am now processing the following task: {task_description}. "
+        "Please hold on while I complete this for you."
+    )
