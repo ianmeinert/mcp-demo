@@ -5,29 +5,62 @@ cd to the `examples/snippets/clients` directory and run:
     uv run server fastmcp_quickstart stdio
 """
 
-import os
 from mcp.server.fastmcp import FastMCP
-from decorators import require_admin
+from decorators import require_groups
 from datasets import fetch_dataset, api, read_document, iter_document_filenames
+import re
+from dotenv import load_dotenv
+import os
+
+# Import authentication utilities
+try:
+    from auth_utils import get_user_token, get_user_info_and_token_simple
+    AUTH_AVAILABLE = True
+except ImportError:
+    AUTH_AVAILABLE = False
+    
 
 # Create an MCP server
 mcp = FastMCP("Demo")
 API_NAME= "MEDICARE_API"
 DOCUMENT_CATEGORY = "medicare"
 
+load_dotenv()
+AUTH_GROUPS = os.getenv("AUTH_GROUPS", "Unauthorized").split(",")
+
 # Add an example from the medicare API
-@mcp.resource("medicare://nursing-home-dataset/{user_role}")
-@require_admin
-def get_medicare_nursing_home_dataset(user_role: str) -> dict:
+@mcp.resource("medicare://nursing-home-dataset")
+@require_groups(AUTH_GROUPS)
+def get_medicare_nursing_home_dataset() -> dict:
     """Fetch datasets from the Medicare API"""
     return fetch_dataset(API_NAME, "nursing_home_dataset")
 
 @mcp.resource("medicare://deficit-reduction-dataset")
-@require_admin
+@require_groups(AUTH_GROUPS)
 def get_deficit_reduction_dataset() -> dict:
     """Fetch datasets from the Medicare API. This example causes failure to demonstrate
     authentication and authorization failures."""
     return fetch_dataset(API_NAME, "deficit_reduction_dataset")
+
+@mcp.resource("medicare://secure-data")
+@require_groups(AUTH_GROUPS)
+def get_secure_medicare_data() -> dict:
+    """Fetch secure Medicare data. Requires specific group membership."""
+    return {
+        "message": "Access granted to secure Medicare data",
+        "data": "This would contain sensitive Medicare information",
+        "access_level": "group_restricted"
+    }
+
+@mcp.resource("medicare://admin-only-data")
+@require_groups(AUTH_GROUPS)
+def get_admin_only_data() -> dict:
+    """Fetch admin-only Medicare data. Requires specific directory roles."""
+    return {
+        "message": "Access granted to administrative Medicare data",
+        "data": "This would contain administrative Medicare information",
+        "access_level": "admin_only"
+    }
 
 
 @mcp.resource("medicare://datasets")
@@ -54,7 +87,6 @@ def get_medicare_document(filename: str) -> str:
 @mcp.tool()
 def answer_from_medicare_documents(question: str) -> str:
     """Answer a question using the contents of all Medicare documents in documents/medicare."""
-    import re
     answers = []
     for fname in iter_document_filenames(DOCUMENT_CATEGORY):
         content = read_document(DOCUMENT_CATEGORY, fname)
@@ -69,6 +101,67 @@ def answer_from_medicare_documents(question: str) -> str:
         lines = read_document(DOCUMENT_CATEGORY, fname).splitlines()
         summary.append(f"From {fname}:\n{chr(10).join(lines[:5])}...")
     return "No direct answer found. Here are summaries:\n" + "\n\n".join(summary)
+
+@mcp.tool()
+def authenticate_user() -> dict:
+    """
+    Authenticate the current user and return their information and access token.
+    This token can be used by the agent for further API calls to Microsoft services.
+    """
+    if not AUTH_AVAILABLE:
+        return {
+            "error": "Authentication not available. Install azure-identity and msgraph-sdk packages.",
+            "status": "unavailable"
+        }
+    
+    result = get_user_info_and_token_simple()
+    
+    if result["status"] == "success":
+        return {
+            "user": {
+                "name": result["display_name"],
+                "email": result["email"],
+                "job_title": result["job_title"],
+                "group_count": result["group_count"]
+            },
+            "authentication": {
+                "status": "authenticated",
+                "token_preview": result["access_token"][:20] + "...",
+                "expires_on": result["token_expires_on"]
+            }
+            # Note: Full token is available internally but not exposed in responses
+        }
+    else:
+        return {
+            "error": result["error"],
+            "status": "authentication_failed"
+        }
+
+@mcp.tool()
+def get_user_access_token() -> dict:
+    """
+    Get just the access token for API calls to Microsoft Graph or other Azure services.
+    Simplified version for when only the token is needed.
+    """
+    if not AUTH_AVAILABLE:
+        return {
+            "error": "Authentication not available. Install azure-identity and msgraph-sdk packages.",
+            "status": "unavailable"
+        }
+    
+    result = get_user_token()
+    
+    if result["status"] == "success":
+        return {
+            "access_token": result["access_token"],
+            "expires_on": result["expires_on"],
+            "status": "success"
+        }
+    else:
+        return {
+            "error": result["error"],
+            "status": "failed"
+        }
 
 @mcp.tool()
 def list_medicare_documents() -> list:
@@ -135,12 +228,21 @@ def explain_medicare_document_access() -> str:
 @mcp.prompt()
 def explain_available_tools() -> str:
     """Summarize what tools are available and what they do."""
-    return (
-        "Available tools include: add (add two numbers), get_medicare_dataset_row_count (count rows in a dataset), "
+    base_tools = (
+        "Available tools include: get_medicare_dataset_row_count (count rows in a dataset), "
         "get_medicare_document (read a document), answer_from_medicare_documents (answer questions from documents), "
         "list_medicare_documents (list all documents), get_medicare_dataset_columns (list dataset columns), and "
         "summarize_medicare_dataset_column (summarize a numeric column)."
     )
+    
+    if AUTH_AVAILABLE:
+        auth_tools = (
+            " Authentication tools: authenticate_user (get user info and token), "
+            "get_user_access_token (get just the access token for API calls)."
+        )
+        return base_tools + auth_tools
+    else:
+        return base_tools + " Authentication tools are not currently available."
 
 @mcp.prompt()
 def explain_tool_resource_flow() -> str:
@@ -155,12 +257,31 @@ def explain_tool_resource_flow() -> str:
     )
 
 @mcp.prompt()
+def explain_authentication() -> str:
+    """Explain how authentication works in this MCP server."""
+    if AUTH_AVAILABLE:
+        return (
+            "This MCP server supports user authentication through Microsoft Entra ID. "
+            "Use the 'authenticate_user' tool to sign in and get user information plus an access token. "
+            "The token can be used for subsequent API calls to Microsoft Graph or other Azure services. "
+            "Use 'get_user_access_token' for a simplified token-only response. "
+            "Authentication is handled automatically through your browser or existing Windows credentials."
+        )
+    else:
+        return (
+            "Authentication is not currently available. To enable user authentication, "
+            "install the required packages: azure-identity and msgraph-sdk. "
+            "Once installed, you can use authenticate_user and get_user_access_token tools."
+        )
+
+@mcp.prompt()
 def explain_role_escalation_policy() -> str:
     """Explain the agent's role escalation policy for authorization."""
     return (
         "By default, you should perform all operations as a 'guest'. If you encounter an authorization error, "
         "ask the user if they would like to proceed as an 'admin'. If the user agrees, retry the operation as 'admin' "
-        "and remember this role for the rest of the session. Always use the least privileged role unless escalation is required."
+        "and remember this role for the rest of the session. Always use the least privileged role unless escalation is required. "
+        "If authentication is enabled, you can also use the authenticate_user tool to get proper user credentials."
     )
 
 @mcp.prompt()
